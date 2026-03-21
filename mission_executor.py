@@ -20,6 +20,7 @@ class MissionState(Enum):
     STATIONKEEPING = auto()
     RTL = auto()
     COMPLETE = auto()
+    FAILSAFE = auto()
 
 
 class MissionExecutorNode(Node):
@@ -31,6 +32,9 @@ class MissionExecutorNode(Node):
         self.declare_parameter('stationkeep_duration', 3.0)
         self.declare_parameter('acceptance_radius', 0.5)
         self.declare_parameter('altitude', 10.0)
+        self.declare_parameter('pose_timeout_s', 2.0)
+        self.pose_timeout   = self.get_parameter ('pose_timeout_s').value
+        self.last_pose_time = None  # set by pose callback
 
         self.stationkeep_duration = self.get_parameter('stationkeep_duration').value
         self.acceptance_radius = self.get_parameter('acceptance_radius').value
@@ -88,6 +92,7 @@ class MissionExecutorNode(Node):
     # ── Callbacks ───────────────────────────────────────────────────
     def pose_callback(self, msg):
         self.current_pose = msg.pose.position
+        self.last_pose_time = self.get_clock().now()   #watchdog timestamp
 
     def waypoints_callback(self, msg):
         if self.state == MissionState.IDLE:
@@ -171,8 +176,33 @@ class MissionExecutorNode(Node):
             self.get_logger().info(f'Advancing to waypoint {self.wp_index}.')
             self.transition(MissionState.NAVIGATING)
 
+    def check_pose_watchdog(self):
+        """
+        Detects pose topic dropout. Transitions to FAILSAFE if the
+        pose topic has been silent for longer than pose_timeout_s.
+        Only activates when the mission is actively flying.
+        """
+        active_states = {
+            MissionState.TAKEOFF,
+            MissionState.NAVIGATING,
+            MissionState.STATIONKEEPING,
+            MissionState.RTL,
+        }
+        if self.state not in active_states:
+            return  # not flying — watchdog not needed
+        if self.last_pose_time is None:
+            return  # no pose received yet — normal at startup
+        elapsed = (self.get_clock().now() - self.last_pose_time).nanoseconds / 1e9
+        if elapsed > self.pose_timeout:
+            self.get_logger().error(
+                f'WATCHDOG TRIGGERED: no pose for {elapsed:.2f}s '
+                f'(timeout={self.pose_timeout}s). Entering FAILSAFE.'
+            )
+            self.transition(MissionState.FAILSAFE)
+
     # ── Main control loop ──────────────────────────────────────────
     def control_loop(self):
+        self.check_pose_watchdog()  # FIRST — always check before acting
         self.publish_state()
 
         if self.state == MissionState.IDLE:
@@ -216,6 +246,11 @@ class MissionExecutorNode(Node):
 
         elif self.state == MissionState.COMPLETE:
             pass
+        
+        elif self.state == MissionState.FAILSAFE:
+            # Stop publishing setpoints — let PX4 offboard loss failsafe take over.
+            # PX4 will detect setpoint dropout and auto-land via COM_OF_LOSS_T.
+            pass  # logged once in transition()
 
 
 def main(args=None):

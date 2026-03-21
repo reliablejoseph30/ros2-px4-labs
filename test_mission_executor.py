@@ -20,7 +20,7 @@ def test_all_states_exist():
     Pass criterion: no AttributeError, all values distinct
     """
     required = ['IDLE', 'ARMED', 'TAKEOFF', 'NAVIGATING',
-                'STATIONKEEPING', 'RTL', 'COMPLETE']
+                'STATIONKEEPING', 'RTL', 'COMPLETE', 'FAILSAFE'] # added
     for name in required:
         assert hasattr(MissionState, name), f'Missing state: {name}'
 
